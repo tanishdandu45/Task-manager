@@ -1,0 +1,139 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reusable global helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Helper functions for User validation
+    function isValidUser(data) {
+      return data.keys().hasAll(['id', 'displayName', 'email', 'photoURL', 'createdAt'])
+        && data.keys().size() == 5
+        && data.id is string && data.id.size() <= 128
+        && data.displayName is string && data.displayName.size() <= 128
+        && data.email is string && data.email.size() <= 128
+        && data.photoURL is string && data.photoURL.size() <= 512
+        && data.createdAt is string && data.createdAt.size() <= 64;
+    }
+
+    // Helper functions for Task validation
+    function isValidTask(data) {
+      return data.keys().hasAll(['id', 'title', 'description', 'status', 'priority', 'creatorId', 'assigneeId', 'createdAt', 'updatedAt'])
+        && (data.keys().size() >= 9 && data.keys().size() <= 11)
+        && data.id is string && data.id.size() <= 128
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 256
+        && data.description is string && data.description.size() <= 2048
+        && data.status is string && (data.status == 'todo' || data.status == 'in_progress' || data.status == 'done')
+        && data.priority is string && (data.priority == 'low' || data.priority == 'medium' || data.priority == 'high')
+        && data.creatorId is string && data.creatorId.size() <= 128
+        && data.assigneeId is string && data.assigneeId.size() <= 128
+        && (!data.keys().hasAll(['dueDate']) || (data.dueDate is string && data.dueDate.size() <= 64))
+        && (!data.keys().hasAll(['projectId']) || (data.projectId is string && data.projectId.size() <= 128))
+        && data.createdAt is string && data.createdAt.size() <= 64
+        && data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
+    // Helper functions for Project validation
+    function isValidProject(data) {
+      return data.keys().hasAll(['id', 'name', 'color', 'creatorId', 'createdAt'])
+        && data.keys().size() == 5
+        && data.id is string && data.id.size() <= 128
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 128
+        && data.color is string && data.color.size() <= 64
+        && data.creatorId is string && data.creatorId.size() <= 128
+        && data.createdAt is string && data.createdAt.size() <= 64;
+    }
+
+    // Core /users matches
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isEmailVerified() && request.auth.uid == userId && isValidUser(incoming());
+      allow update: if isEmailVerified() && request.auth.uid == userId && isValidUser(incoming())
+        && incoming().id == existing().id
+        && incoming().email == existing().email
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL']);
+    }
+
+    // Core /tasks matches
+    match /tasks/{taskId} {
+      // Creator helper
+      function isCreator(taskData) {
+        return taskData.creatorId == request.auth.uid;
+      }
+
+      // Assignee helper
+      function isAssignee(taskData) {
+        return taskData.assigneeId == request.auth.uid;
+      }
+
+      // Read / Get / List
+      // Single get is allowed if they are involved
+      allow get: if isSignedIn() && (isCreator(existing()) || isAssignee(existing()));
+      
+      // List enforcer: forces client to filter tasks
+      allow list: if isSignedIn() && (resource.data.creatorId == request.auth.uid || resource.data.assigneeId == request.auth.uid);
+
+      // Create task
+      allow create: if isSignedIn() && isValidId(taskId) && isValidTask(incoming())
+        && incoming().creatorId == request.auth.uid
+        && (incoming().assigneeId == request.auth.uid || exists(/databases/$(database)/documents/users/$(incoming().assigneeId)));
+
+      // Update task
+      allow update: if isSignedIn() && isValidTask(incoming()) && (
+        // Case 1: Creator can update all non-immutable fields
+        (isCreator(existing()) 
+          && incoming().id == existing().id 
+          && incoming().creatorId == existing().creatorId 
+          && incoming().createdAt == existing().createdAt
+          && (incoming().assigneeId == existing().assigneeId || incoming().assigneeId == request.auth.uid || exists(/databases/$(database)/documents/users/$(incoming().assigneeId)))
+        ) ||
+        // Case 2: Assignee can ONLY change status and updatedAt
+        (isAssignee(existing()) 
+          && incoming().id == existing().id 
+          && incoming().creatorId == existing().creatorId 
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+        )
+      );
+
+      // Delete task: Only creator can delete
+      allow delete: if isSignedIn() && isCreator(existing());
+    }
+
+    // Projects spaces match
+    match /projects/{projectId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(projectId) && isValidProject(incoming()) && incoming().creatorId == request.auth.uid;
+      allow update: if isSignedIn() && isValidProject(incoming()) 
+        && (!('creatorId' in existing()) || existing().creatorId == request.auth.uid) 
+        && incoming().id == existing().id 
+        && (!('creatorId' in existing()) || incoming().creatorId == existing().creatorId) 
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if isSignedIn() && (!('creatorId' in existing()) || existing().creatorId == request.auth.uid);
+    }
+  }
+}

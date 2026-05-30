@@ -1,0 +1,6 @@
+{
+  "name": "Task Manager",
+  "description": "A comprehensive task management application with user authentication, real-time updates, and task tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
